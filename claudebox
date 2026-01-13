@@ -1,17 +1,37 @@
 #!/bin/sh
-# claude-sandbox: Run Claude Code in an isolated Podman container
-# Usage: claude-sandbox [claude args...]
+# claudebox: Run Claude Code in an isolated container
+# Usage: claudebox [claude args...]
 
 set -eu
 
 IMAGE_NAME="claude-code:latest"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-CONTAINERFILE="${SCRIPT_DIR}/Containerfile"
+
+# Detect available container runtime (prefer podman)
+if command -v podman >/dev/null 2>&1; then
+    RUNTIME="podman"
+    CONTAINERFILE="${SCRIPT_DIR}/Containerfile"
+elif command -v docker >/dev/null 2>&1; then
+    RUNTIME="docker"
+    CONTAINERFILE="${SCRIPT_DIR}/Dockerfile"
+else
+    printf "Error: No container runtime found. Install podman or docker.\n" >&2
+    exit 1
+fi
+
+# Check if image exists (different commands for podman vs docker)
+image_exists() {
+    if [ "$RUNTIME" = "podman" ]; then
+        podman image exists "${IMAGE_NAME}" 2>/dev/null
+    else
+        docker image inspect "${IMAGE_NAME}" >/dev/null 2>&1
+    fi
+}
 
 # Build image if it doesn't exist
-if ! podman image exists "${IMAGE_NAME}" 2>/dev/null; then
-    printf "Building Claude Code container image...\n"
-    podman build -t "${IMAGE_NAME}" -f "${CONTAINERFILE}" "${SCRIPT_DIR}"
+if ! image_exists; then
+    printf "Building Claude Code container image using %s...\n" "${RUNTIME}"
+    $RUNTIME build -t "${IMAGE_NAME}" -f "${CONTAINERFILE}" "${SCRIPT_DIR}"
 fi
 
 # Get current directory as workspace and extract project name
@@ -34,7 +54,7 @@ KARYA_CONFIG="${SCRIPT_DIR}/karya"
 # -v: Mount current directory as /workspace/<project>/
 # -v: Mount karya config to /home/claude/.config/karya
 # -e: Pass through API key if set
-exec podman run \
+exec $RUNTIME run \
     --rm \
     --interactive \
     --tty \
@@ -43,7 +63,7 @@ exec podman run \
     --read-only \
     --tmpfs /tmp:rw,noexec,nosuid \
     -v "${CLAUDE_HOME}:/home/claude:rw" \
-    -v "${KARYA_CONFIG}:/home/claude/.config/karya:r" \
+    -v "${KARYA_CONFIG}:/home/claude/.config/karya:rw" \
     -v "${WORKSPACE}:/workspace/${PROJECT_NAME}:rw" \
     -v /workspace/zet \
     -e COLORTERM="truecolor" \
