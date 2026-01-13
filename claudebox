@@ -1,0 +1,53 @@
+#!/bin/sh
+# claude-sandbox: Run Claude Code in an isolated Podman container
+# Usage: claude-sandbox [claude args...]
+
+set -eu
+
+IMAGE_NAME="claude-code:latest"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+CONTAINERFILE="${SCRIPT_DIR}/Containerfile"
+
+# Build image if it doesn't exist
+if ! podman image exists "${IMAGE_NAME}" 2>/dev/null; then
+    printf "Building Claude Code container image...\n"
+    podman build -t "${IMAGE_NAME}" -f "${CONTAINERFILE}" "${SCRIPT_DIR}"
+fi
+
+# Get current directory as workspace and extract project name
+WORKSPACE="$(pwd)"
+PROJECT_NAME="$(basename "${WORKSPACE}")"
+
+# Claude home directory with pre-configured settings
+CLAUDE_HOME="${SCRIPT_DIR}/claude"
+
+# Karya config directory
+KARYA_CONFIG="${SCRIPT_DIR}/karya"
+
+# Run Claude Code in container with workspace mounted
+# --rm: Remove container after exit
+# --interactive --tty: Enable interactive terminal
+# --security-opt=no-new-privileges: Prevent privilege escalation
+# --cap-drop=ALL: Drop all capabilities
+# --read-only: Read-only root filesystem (workspace is writable)
+# --tmpfs: Writable temp directories
+# -v: Mount current directory as /workspace/<project>/
+# -v: Mount karya config to /home/claude/.config/karya
+# -e: Pass through API key if set
+exec podman run \
+    --rm \
+    --interactive \
+    --tty \
+    --security-opt=no-new-privileges \
+    --cap-drop=ALL \
+    --read-only \
+    --tmpfs /tmp:rw,noexec,nosuid \
+    -v "${CLAUDE_HOME}:/home/claude:rw" \
+    -v "${KARYA_CONFIG}:/home/claude/.config/karya:r" \
+    -v "${WORKSPACE}:/workspace/${PROJECT_NAME}:rw" \
+    -v /workspace/zet \
+    -e COLORTERM="truecolor" \
+    ${ANTHROPIC_API_KEY:+-e ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY}"} \
+    "${IMAGE_NAME}" \
+    --dangerously-skip-permissions \
+    "$@"

@@ -1,0 +1,38 @@
+# Karya toolkit Configuration
+
+#[general]
+
+# -----------------------------------------------
+[directories]
+projects = "/workspace" # Root directory for projects
+zettelkasten = "/workspace/zet"   # Zettelkasten directory
+karya = "/workspace"     # Karya inbox directory
+
+# -----------------------------------------------
+[todo]
+show_completed = false
+structured = true
+active = ["TODO", "TASK", "NOTE", "REMINDER", "EVENT", "MEETING",
+          "CALL", "EMAIL", "MESSAGE", "FOLLOWUP", "REVIEW",
+          "CHECKIN", "CHECKOUT", "RESEARCH", "READING", "WRITING",
+          "DRAFT", "FINALIZE", "SUBMIT", "PRESENTATION",
+          "NEED", "VERIFY", "REQ", "QA", "TECHREQ", "SYSTEST"]
+inprogress = ["DOING", "INPROGRESS", "WIP", "WORKING", "STARTED", "WAITING", "DEFERRED", "DELEGATED"]
+someday = ["SOMEDAY", "MAYBE", "LATER", "FUTURE", "WISHLIST"]
+completed = ["ARCHIVED", "CANCELED", "DELETED", "DONE", "COMPLETED", "CLOSED"]
+special-tags = ["priority", "sprint"]
+
+# -----------------------------------------------
+[goals]
+# Quarter start month (defaults to January). Supported values: "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"
+year-start = "June"
+
+[colors]
+theme = "Gruvbox Dark"
+someday = "#8080A0"
+# tag               = "#000000"          # Tag badge text
+# tag-bg            = "magenta"        # Tag badge background
+# special-tag      = "#000000"           # Special tag badge text
+# special-tag-bg   = "yellow"   # Special tag badge background
+# assignee          = "bright-white"   # Assignee badge text
+# assignee-bg       = "black"          # Assignee badge background
