@@ -69,4 +69,4 @@ RUN mkdir -p /home/claude/.local/share/crush/mcp
 
 WORKDIR /workspace
 
-ENTRYPOINT ["claude"]
+ENTRYPOINT ["/bin/bash"]
