@@ -1,0 +1,59 @@
+#!/bin/bash
+# Pre-push hook for Claudebox
+# Validates that pushes only go to allowlisted remotes
+#
+# This hook is called with the following parameters:
+# $1 -- Name of the remote
+# $2 -- URL of the remote
+#
+# See SECURE_CLAUDE_CODE.md Design 7 for details
+
+# Allowlisted remote patterns
+# Customize this list for your organization
+ALLOWED_REMOTES=(
+    "github.com"
+    "gitlab.com"
+    # Add your organization's git server here:
+    # "git.mycompany.internal"
+)
+
+remote="$1"
+url="$2"
+
+# If no URL provided, try to get it from remote name
+if [[ -z "$url" ]]; then
+    url=$(git remote get-url "$remote" 2>/dev/null)
+fi
+
+if [[ -z "$url" ]]; then
+    echo "ERROR: Could not determine remote URL"
+    exit 1
+fi
+
+# Check if URL matches any allowed pattern
+for allowed in "${ALLOWED_REMOTES[@]}"; do
+    if [[ "$url" == *"$allowed"* ]]; then
+        # Allowed - proceed with push
+        exit 0
+    fi
+done
+
+# Not allowed - block the push
+echo "=========================================="
+echo "ERROR: Push to unauthorized remote blocked"
+echo "=========================================="
+echo ""
+echo "Remote: $remote"
+echo "URL: $url"
+echo ""
+echo "Allowed remotes:"
+for allowed in "${ALLOWED_REMOTES[@]}"; do
+    echo "  - $allowed"
+done
+echo ""
+echo "To add a new allowed remote, edit:"
+echo "  /etc/git-hooks/pre-push"
+echo ""
+echo "See SECURE_CLAUDE_CODE.md Design 7 for details."
+echo "=========================================="
+exit 1
