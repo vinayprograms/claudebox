@@ -1,10 +1,24 @@
 # Claude Code configuration (may contain sensitive data)
-.claude
+.claude/
+.claude.json
 claude/
 
 # Claudebox runtime directories
 claude-config/
 claudebox-logs/
+
+# Claude Code runtime artifacts (if created in workspace)
+cache/
+debug/
+file-history/
+history.jsonl
+plans/
+plugins/
+projects/
+session-env/
+shell-snapshots/
+statsig/
+todos/
 
 # Credentials (never commit!)
 *.credentials.json

@@ -85,14 +85,14 @@ EOF
 # Detect container runtime
 
 detect_runtime() {
-    if command -v podman &>/dev/null; then
+    # Check if runtime is installed AND running (not just installed)
+    if command -v podman &>/dev/null && podman info &>/dev/null; then
         RUNTIME="podman"
-        CONTAINER_FILE="Containerfile"
-    elif command -v docker &>/dev/null; then
+    elif command -v docker &>/dev/null && docker info &>/dev/null; then
         RUNTIME="docker"
-        CONTAINER_FILE="Dockerfile"
     else
-        log_error "Neither podman nor docker is installed."
+        log_error "No running container runtime found."
+        log_error "Please start podman or docker and try again."
         exit 1
     fi
     log_info "Using container runtime: $RUNTIME"
@@ -103,20 +103,20 @@ detect_runtime() {
 
 build_main_container() {
     log_header "Building Claudebox container"
-    $RUNTIME build -f "$SCRIPT_DIR/$CONTAINER_FILE" -t "$IMAGE_NAME" "$SCRIPT_DIR"
+    $RUNTIME build -f "$SCRIPT_DIR/Containerfile" -t "$IMAGE_NAME" "$SCRIPT_DIR"
 }
 
 build_proxy_container() {
     log_header "Building proxy container"
-    $RUNTIME build -f "$SCRIPT_DIR/proxy/Dockerfile" -t "$PROXY_IMAGE_NAME" "$SCRIPT_DIR/proxy"
+    $RUNTIME build -f "$SCRIPT_DIR/proxy/Containerfile" -t "$PROXY_IMAGE_NAME" "$SCRIPT_DIR/proxy"
 }
 
 #######################################
 # Network setup
 
 setup_network() {
-    # Check if network exists
-    if ! $RUNTIME network exists "$NETWORK_NAME" 2>/dev/null; then
+    # Check if network exists (use 'inspect' for Docker compatibility)
+    if ! $RUNTIME network inspect "$NETWORK_NAME" &>/dev/null; then
         log_info "Creating internal network: $NETWORK_NAME"
         $RUNTIME network create --internal "$NETWORK_NAME"
     fi
@@ -132,18 +132,30 @@ start_proxy() {
         return 0
     fi
 
+    # Remove any stopped proxy container from previous runs
+    if $RUNTIME ps -a --format '{{.Names}}' | grep -q "^claudebox-proxy$"; then
+        log_info "Removing stopped proxy container..."
+        $RUNTIME rm claudebox-proxy
+    fi
+
     log_info "Starting proxy container..."
 
-    $RUNTIME run -d \
+    # Proxy needs external network access to forward requests
+    # Start on default network first, then connect to internal network
+    # Note: mode=1777 on tmpfs allows squid user to write (container runs as squid)
+    $RUNTIME run -d --rm \
         --name claudebox-proxy \
-        --network "$NETWORK_NAME" \
         --cap-drop ALL \
         --read-only \
-        --tmpfs /var/cache/squid:size=100M \
-        --tmpfs /var/log/squid:size=10M \
-        --tmpfs /var/run/squid:size=1M \
+        --tmpfs /var/cache/squid:size=100M,mode=1777 \
+        --tmpfs /var/log/squid:size=10M,mode=1777 \
+        --tmpfs /var/run/squid:size=1M,mode=1777 \
         -v "$SCRIPT_DIR/proxy-allowlist.conf":/etc/squid/allowlist.conf:ro \
         "$PROXY_IMAGE_NAME"
+
+    # Connect proxy to internal network so main container can reach it
+    log_info "Connecting proxy to internal network..."
+    $RUNTIME network connect "$NETWORK_NAME" claudebox-proxy
 
     # Wait for proxy to be ready
     log_info "Waiting for proxy to start..."
@@ -153,8 +165,39 @@ start_proxy() {
 stop_proxy() {
     if $RUNTIME ps --format '{{.Names}}' | grep -q "^claudebox-proxy$"; then
         log_info "Stopping proxy container..."
-        $RUNTIME stop claudebox-proxy
-        $RUNTIME rm claudebox-proxy
+        $RUNTIME stop claudebox-proxy 2>/dev/null
+        $RUNTIME rm claudebox-proxy 2>/dev/null
+    fi
+}
+
+# Check if other claudebox instances are using the proxy
+# Returns 0 if other instances exist, 1 if we're the last one
+other_instances_exist() {
+    # List containers on the internal network, excluding the proxy
+    local other_containers
+    other_containers=$($RUNTIME ps --format '{{.Names}}' \
+        --filter "network=$NETWORK_NAME" 2>/dev/null | \
+        grep -v "^claudebox-proxy$" | \
+        wc -l | tr -d ' ')
+
+    # If any non-proxy containers exist, other instances are running
+    [[ "$other_containers" -gt 0 ]]
+}
+
+# Intelligent proxy cleanup - only stop if no other instances are using it
+cleanup_proxy_if_unused() {
+    if [[ "$USE_PROXY" != "true" ]]; then
+        return
+    fi
+
+    # Give a moment for our container to fully exit
+    sleep 1
+
+    if other_instances_exist; then
+        log_info "Other claudebox instances running - keeping proxy alive"
+    else
+        log_info "No other claudebox instances - stopping proxy"
+        stop_proxy
     fi
 }
 
@@ -164,12 +207,18 @@ stop_proxy() {
 get_credentials() {
     CREDS_FILE=""
 
-    # Try 1Password first
-    if [[ -n "$OP_VAULT" ]] || [[ -n "$OP_ITEM" ]] || command -v op &>/dev/null; then
+    # Only try 1Password if user explicitly configured it (not just because op is installed)
+    if [[ -n "$OP_VAULT" ]] || [[ -n "$OP_ITEM" ]]; then
         if command -v op &>/dev/null && op account list &>/dev/null 2>&1; then
             log_info "Using 1Password for credentials..."
-            CREDS_FILE=$("$SCRIPT_DIR/scripts/inject-credentials-1password.sh")
-            return 0
+            if CREDS_FILE=$("$SCRIPT_DIR/scripts/inject-credentials-1password.sh" 2>&1); then
+                return 0
+            else
+                log_warn "Failed to retrieve credentials from 1Password. Continuing without."
+                CREDS_FILE=""
+            fi
+        else
+            log_warn "1Password configured but not signed in. Continuing without credentials."
         fi
     fi
 
@@ -177,12 +226,16 @@ get_credentials() {
     ENCRYPTED_FILE="${CLAUDE_CREDENTIALS_FILE:-$HOME/.claude/credentials.json.age}"
     if [[ -f "$ENCRYPTED_FILE" ]]; then
         log_info "Using age-encrypted credentials..."
-        CREDS_FILE=$("$SCRIPT_DIR/scripts/inject-credentials-age.sh")
-        return 0
+        if CREDS_FILE=$("$SCRIPT_DIR/scripts/inject-credentials-age.sh" 2>&1); then
+            return 0
+        else
+            log_warn "Failed to decrypt credentials. Continuing without."
+            CREDS_FILE=""
+        fi
     fi
 
     # Try plaintext credentials (warn user)
-    PLAIN_CREDS="$CLAUDE_DIR/.credentials.json"
+    PLAIN_CREDS="$CLAUDE_DIR/.claude/.credentials.json"
     if [[ -f "$PLAIN_CREDS" ]]; then
         log_warn "Using plaintext credentials (consider encrypting with ./scripts/setup-credentials.sh)"
         CREDS_FILE="$PLAIN_CREDS"
@@ -190,7 +243,7 @@ get_credentials() {
     fi
 
     # No credentials found - Claude Code will prompt for auth
-    log_warn "No credentials found. You may need to authenticate."
+    log_info "No credentials found. Claude Code will prompt for authentication."
     return 0
 }
 
@@ -226,12 +279,12 @@ setup_logging() {
 
 setup_directories() {
     # Create config directory structure
+    # This entire directory is mounted as ~/.claude inside the container
     mkdir -p "$CLAUDE_DIR/.claude/projects"
-    mkdir -p "$CLAUDE_DIR/settings"
 
     # Create empty settings files if they don't exist
-    [[ -f "$CLAUDE_DIR/settings.json" ]] || echo '{}' > "$CLAUDE_DIR/settings.json"
-    [[ -f "$CLAUDE_DIR/settings.local.json" ]] || echo '{}' > "$CLAUDE_DIR/settings.local.json"
+    [[ -f "$CLAUDE_DIR/.claude/settings.json" ]] || echo '{}' > "$CLAUDE_DIR/.claude/settings.json"
+    [[ -f "$CLAUDE_DIR/.claude/settings.local.json" ]] || echo '{}' > "$CLAUDE_DIR/.claude/settings.local.json"
 }
 
 #######################################
@@ -246,20 +299,59 @@ run_container() {
     # Build mount arguments
     local mounts=()
 
-    # Workspace (read-write)
-    mounts+=("-v" "$SCRIPT_DIR:/workspace:rw")
+    # Workspace: Mount CURRENT WORKING DIRECTORY, not script directory
+    # SECURITY: This ensures claudebox installation files (proxy-allowlist.conf,
+    # seccomp-profile.json, etc.) are NOT accessible to Claude Code
+    local workspace_dir="$PWD"
+    mounts+=("-v" "$workspace_dir:/workspace:rw")
 
-    # Settings (read-only, mounted to claude's home for symlinks)
-    mounts+=("-v" "$CLAUDE_DIR/settings.json:/home/claude/.claude/settings.json:ro")
-    mounts+=("-v" "$CLAUDE_DIR/settings.local.json:/home/claude/.claude/settings.local.json:ro")
-
-    # Credentials (read-only)
-    if [[ -n "$CREDS_FILE" ]] && [[ -f "$CREDS_FILE" ]]; then
-        mounts+=("-v" "$CREDS_FILE:/home/claude/.claude/.credentials.json:ro")
+    # Home directory needs tmpfs for Claude's runtime files (.claude.json, etc.)
+    # We overlay specific paths on top for config management
+    # Note: Docker doesn't handle tmpfs + bind mount overlay well, so skip for Docker
+    if [[ "$RUNTIME" == "podman" ]]; then
+        mounts+=("--tmpfs" "/home/claude-agent:size=50M,mode=1777")
     fi
 
-    # Session logs (read-write)
-    mounts+=("-v" "$CLAUDE_DIR/.claude/projects:/home/claude-agent/.claude/projects:rw")
+    # Claude config mounts - two modes based on whether credentials exist
+    local creds_on_host="$CLAUDE_DIR/.claude/.credentials.json"
+
+    # Claude Code uses ~/.claude.json (in home dir) for session state - must be rw
+    local claude_json="$CLAUDE_DIR/.claude.json"
+    [[ -f "$claude_json" ]] || echo '{}' > "$claude_json"
+    mounts+=("-v" "$claude_json:/home/claude-agent/.claude.json:rw")
+
+    # Mount Claude config - tmpfs base + mount specific files/dirs to persist session state
+    # We skip debug/ and statsig/ (caches that cause hangs when large) but keep session data
+    if [[ -f "$creds_on_host" ]]; then
+        log_info "Existing credentials found - using secured mode"
+
+        # Base: tmpfs for .claude (allows Claude to create any structure it needs)
+        mounts+=("--tmpfs" "/home/claude-agent/.claude:size=50M,mode=1777")
+
+        # Auth & settings (read-only for security)
+        mounts+=("-v" "$creds_on_host:/home/claude-agent/.claude/.credentials.json:ro")
+        [[ -f "$CLAUDE_DIR/.claude/settings.json" ]] && \
+            mounts+=("-v" "$CLAUDE_DIR/.claude/settings.json:/home/claude-agent/.claude/settings.json:ro")
+        [[ -f "$CLAUDE_DIR/.claude/settings.local.json" ]] && \
+            mounts+=("-v" "$CLAUDE_DIR/.claude/settings.local.json:/home/claude-agent/.claude/settings.local.json:ro")
+
+        # Session state (read-write for persistence)
+        [[ -f "$CLAUDE_DIR/.claude/history.jsonl" ]] && \
+            mounts+=("-v" "$CLAUDE_DIR/.claude/history.jsonl:/home/claude-agent/.claude/history.jsonl:rw")
+        [[ -d "$CLAUDE_DIR/.claude/projects" ]] && \
+            mounts+=("-v" "$CLAUDE_DIR/.claude/projects:/home/claude-agent/.claude/projects:rw")
+        [[ -d "$CLAUDE_DIR/.claude/todos" ]] && \
+            mounts+=("-v" "$CLAUDE_DIR/.claude/todos:/home/claude-agent/.claude/todos:rw")
+
+        # Note: debug/, statsig/, session-env/, shell-snapshots/ are NOT mounted
+        # They accumulate files and cause container hangs when mounted
+    else
+        # First-time setup: mount .claude directory writable for initial authentication
+        log_warn "No credentials found - running in SETUP MODE"
+        log_warn "After authentication, restart to enable secured mode"
+        log_warn "Credentials will be saved to: $creds_on_host"
+        mounts+=("-v" "$CLAUDE_DIR/.claude:/home/claude-agent/.claude:rw")
+    fi
 
     # Command logs (read-write)
     mounts+=("-v" "$LOG_DIR:/var/log/claudebox:rw")
@@ -275,11 +367,11 @@ run_container() {
     fi
 
     # Build network arguments
+    # Note: Don't override DNS - podman's internal network provides DNS for container
+    # names (e.g., claudebox-proxy). The proxy allowlist controls external access.
     local net_args=()
     if [[ "$use_proxy" == "true" ]]; then
         net_args+=("--network" "$NETWORK_NAME")
-        net_args+=("--dns" "127.0.0.1")
-        net_args+=("--dns-search" ".")
     fi
 
     # Build security arguments
@@ -287,15 +379,19 @@ run_container() {
         "--read-only"
         "--cap-drop" "ALL"
         "--security-opt" "no-new-privileges"
-        "--security-opt" "seccomp=$SCRIPT_DIR/seccomp-profile.json"
-        "--pid=private"
-        "--ipc=private"
         "--memory" "$MEMORY_LIMIT"
         "--cpus" "$CPU_LIMIT"
         "--pids-limit" "$PIDS_LIMIT"
-        "--ulimit" "nofile=256:256"
-        "--ulimit" "nproc=64:64"
+        "--ulimit" "nofile=1024:1024"
+        "--ulimit" "nproc=256:256"
     )
+
+    # Runtime-specific options
+    if [[ "$RUNTIME" == "podman" ]]; then
+        security_args+=("--pid=private" "--ipc=private")
+        security_args+=("--security-opt" "seccomp=$SCRIPT_DIR/seccomp-profile.json")
+    fi
+    # Note: Docker's default seccomp profile is sufficient; custom profile causes hangs
 
     # Temp filesystems
     local tmpfs_args=(
@@ -308,15 +404,29 @@ run_container() {
     if [[ "$run_shell" == "true" ]]; then
         cmd_args=("/bin/bash")
     elif [[ ${#claude_args[@]} -gt 0 ]]; then
-        cmd_args=("${claude_args[@]}")
+        # Prepend 'claude' command when passing extra arguments
+        cmd_args=("claude" "--dangerously-skip-permissions" "${claude_args[@]}")
     fi
 
     log_header "Starting Claudebox"
-    log_info "Workspace: $SCRIPT_DIR"
+    log_info "Workspace: $workspace_dir"
     log_info "Proxy: $([[ "$use_proxy" == "true" ]] && echo "enabled" || echo "disabled")"
 
     # Run the container
-    $RUNTIME run --rm -it \
+    # Use consistent hostname so Claude Code recognizes the installation across runs
+    local init_arg=""
+    if [[ "$RUNTIME" == "docker" ]]; then
+        # Docker needs --init for proper TTY/signal handling on macOS
+        init_arg="--init"
+    fi
+
+    # Debug: show the full command
+    if [[ -n "$CLAUDEBOX_DEBUG" ]]; then
+        log_info "Command: $RUNTIME run --rm -it $init_arg --hostname claudebox ${mounts[*]} ${env_args[*]} ${net_args[*]} ${security_args[*]} ${tmpfs_args[*]} $IMAGE_NAME ${cmd_args[*]}"
+    fi
+
+    $RUNTIME run --rm -it $init_arg \
+        --hostname claudebox \
         "${mounts[@]}" \
         "${env_args[@]}" \
         "${net_args[@]}" \
@@ -386,7 +496,16 @@ main() {
 
     # Get credentials
     get_credentials
-    trap cleanup_credentials EXIT
+
+    # Store proxy state for cleanup function (needs to be global)
+    USE_PROXY="$use_proxy"
+
+    # Cleanup on exit: credentials and proxy (if last instance)
+    cleanup_on_exit() {
+        cleanup_credentials
+        cleanup_proxy_if_unused
+    }
+    trap cleanup_on_exit EXIT
 
     # Start proxy if needed
     if [[ "$use_proxy" == "true" ]]; then

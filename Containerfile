@@ -19,8 +19,10 @@ RUN apk add --no-cache \
 # Create non-root users:
 # claude - supervisory user that owns configuration files
 # claude-agent - restricted runtime user for Claude Code execution
-RUN adduser -D -s /bin/bash -g claude claude && \
-    adduser -D -s /bin/false -g claude claude-agent && \
+# Note: -G adds claude-agent to the 'claude' group (supplementary)
+#       so it can read files owned by claude:claude with group permissions
+RUN adduser -D -s /bin/bash claude && \
+    adduser -D -s /bin/false -G claude claude-agent && \
     mkdir /workspace && \
     chown -R claude:claude /home/claude && \
     chown -R claude-agent:claude /home/claude-agent && \
@@ -89,16 +91,11 @@ RUN mkdir -p /home/claude/.claude && \
     chown -R claude:claude /home/claude/.claude && \
     chmod 750 /home/claude/.claude
 
-# Create claude-agent's directory with symlinks to claude's config
-# This allows claude-agent to READ config but not WRITE to it
-RUN mkdir -p /home/claude-agent/.claude/projects && \
-    ln -s /home/claude/.claude/settings.json /home/claude-agent/.claude/settings.json && \
-    ln -s /home/claude/.claude/settings.local.json /home/claude-agent/.claude/settings.local.json && \
-    ln -s /home/claude/.claude/.credentials.json /home/claude-agent/.claude/.credentials.json && \
-    chown -R claude-agent:claude /home/claude-agent/.claude && \
-    chown -h claude-agent:claude /home/claude-agent/.claude/settings.json && \
-    chown -h claude-agent:claude /home/claude-agent/.claude/settings.local.json && \
-    chown -h claude-agent:claude /home/claude-agent/.claude/.credentials.json
+# Create claude-agent's directory structure
+# Note: Actual config files are mounted at runtime via tmpfs + bind mounts
+# No symlinks needed - the claudebox script handles mount layering
+RUN mkdir -p /home/claude-agent/.claude && \
+    chown -R claude-agent:claude /home/claude-agent/.claude
 
 #######################################
 # Git Configuration

@@ -34,10 +34,10 @@ if [[ -f "/workspace/.mcp.json" ]]; then
 fi
 
 # Check if credentials are available
-if [[ ! -f "/home/claude/.claude/.credentials.json" ]] && \
+if [[ ! -f "$HOME/.claude/.credentials.json" ]] && \
    [[ -z "$ANTHROPIC_API_KEY" ]]; then
     log_warn "No credentials found. You may need to authenticate."
-    log_warn "Mount credentials to /home/claude/.claude/.credentials.json"
+    log_warn "Mount credentials to $HOME/.claude/.credentials.json"
 fi
 
 # Log startup

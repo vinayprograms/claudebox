@@ -26,5 +26,8 @@ EXPOSE 3128
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
     CMD squid -k check || exit 1
 
-# Run squid in foreground
+# Run as squid user (avoids needing SETUID/SETGID capabilities)
+USER squid
+
+# Run squid in foreground (-N), with debug level 1
 CMD ["squid", "-N", "-d", "1"]
