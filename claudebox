@@ -1,0 +1,401 @@
+#!/bin/bash
+# Claudebox - Secure container for running Claude Code
+#
+# This script builds and runs Claude Code in a security-hardened container
+# with network isolation, filesystem restrictions, and audit logging.
+#
+# See SECURE_CLAUDE_CODE.md for complete security documentation.
+#
+# Usage:
+#   ./claudebox [options] [-- claude-args]
+#
+# Options:
+#   --no-proxy      Run without network proxy (less secure)
+#   --build-only    Only build the container, don't run
+#   --shell         Start a shell instead of Claude Code
+#   --help          Show this help message
+#
+# Environment variables:
+#   CLAUDE_CREDENTIALS_FILE  Path to age-encrypted credentials
+#   OP_VAULT                 1Password vault name
+#   OP_ITEM                  1Password item name
+
+set -e
+
+#######################################
+# Configuration
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CLAUDE_DIR="$SCRIPT_DIR/claude-config"
+LOG_DIR="$SCRIPT_DIR/claudebox-logs"
+
+# Container settings
+IMAGE_NAME="claudebox:latest"
+PROXY_IMAGE_NAME="claudebox-proxy:latest"
+NETWORK_NAME="claudebox-internal"
+
+# Resource limits
+MEMORY_LIMIT="2g"
+CPU_LIMIT="2"
+PIDS_LIMIT="256"
+
+#######################################
+# Helper functions
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+log_info() { echo -e "${GREEN}[claudebox]${NC} $1"; }
+log_warn() { echo -e "${YELLOW}[claudebox]${NC} $1"; }
+log_error() { echo -e "${RED}[claudebox]${NC} $1" >&2; }
+log_header() { echo -e "${CYAN}=== $1 ===${NC}"; }
+
+show_help() {
+    cat << EOF
+Claudebox - Secure container for running Claude Code
+
+Usage:
+  ./claudebox [options] [-- claude-args]
+
+Options:
+  --no-proxy      Run without network proxy (less secure, but simpler)
+  --build-only    Only build the container, don't run
+  --shell         Start a shell instead of Claude Code
+  --help          Show this help message
+
+Environment variables:
+  CLAUDE_CREDENTIALS_FILE  Path to age-encrypted credentials file
+  OP_VAULT                 1Password vault name (default: Private)
+  OP_ITEM                  1Password item name (default: Claude Code)
+
+Examples:
+  ./claudebox                      # Run Claude Code with full security
+  ./claudebox --no-proxy           # Run without proxy (simpler setup)
+  ./claudebox --shell              # Start a shell for debugging
+  ./claudebox -- --help            # Pass --help to Claude Code
+
+For complete security documentation, see SECURE_CLAUDE_CODE.md
+EOF
+}
+
+#######################################
+# Detect container runtime
+
+detect_runtime() {
+    if command -v podman &>/dev/null; then
+        RUNTIME="podman"
+        CONTAINER_FILE="Containerfile"
+    elif command -v docker &>/dev/null; then
+        RUNTIME="docker"
+        CONTAINER_FILE="Dockerfile"
+    else
+        log_error "Neither podman nor docker is installed."
+        exit 1
+    fi
+    log_info "Using container runtime: $RUNTIME"
+}
+
+#######################################
+# Build containers
+
+build_main_container() {
+    log_header "Building Claudebox container"
+    $RUNTIME build -f "$SCRIPT_DIR/$CONTAINER_FILE" -t "$IMAGE_NAME" "$SCRIPT_DIR"
+}
+
+build_proxy_container() {
+    log_header "Building proxy container"
+    $RUNTIME build -f "$SCRIPT_DIR/proxy/Dockerfile" -t "$PROXY_IMAGE_NAME" "$SCRIPT_DIR/proxy"
+}
+
+#######################################
+# Network setup
+
+setup_network() {
+    # Check if network exists
+    if ! $RUNTIME network exists "$NETWORK_NAME" 2>/dev/null; then
+        log_info "Creating internal network: $NETWORK_NAME"
+        $RUNTIME network create --internal "$NETWORK_NAME"
+    fi
+}
+
+#######################################
+# Proxy management
+
+start_proxy() {
+    # Check if proxy is already running
+    if $RUNTIME ps --format '{{.Names}}' | grep -q "^claudebox-proxy$"; then
+        log_info "Proxy container already running"
+        return 0
+    fi
+
+    log_info "Starting proxy container..."
+
+    $RUNTIME run -d \
+        --name claudebox-proxy \
+        --network "$NETWORK_NAME" \
+        --cap-drop ALL \
+        --read-only \
+        --tmpfs /var/cache/squid:size=100M \
+        --tmpfs /var/log/squid:size=10M \
+        --tmpfs /var/run/squid:size=1M \
+        -v "$SCRIPT_DIR/proxy-allowlist.conf":/etc/squid/allowlist.conf:ro \
+        "$PROXY_IMAGE_NAME"
+
+    # Wait for proxy to be ready
+    log_info "Waiting for proxy to start..."
+    sleep 2
+}
+
+stop_proxy() {
+    if $RUNTIME ps --format '{{.Names}}' | grep -q "^claudebox-proxy$"; then
+        log_info "Stopping proxy container..."
+        $RUNTIME stop claudebox-proxy
+        $RUNTIME rm claudebox-proxy
+    fi
+}
+
+#######################################
+# Credential handling
+
+get_credentials() {
+    CREDS_FILE=""
+
+    # Try 1Password first
+    if [[ -n "$OP_VAULT" ]] || [[ -n "$OP_ITEM" ]] || command -v op &>/dev/null; then
+        if command -v op &>/dev/null && op account list &>/dev/null 2>&1; then
+            log_info "Using 1Password for credentials..."
+            CREDS_FILE=$("$SCRIPT_DIR/scripts/inject-credentials-1password.sh")
+            return 0
+        fi
+    fi
+
+    # Try age-encrypted file
+    ENCRYPTED_FILE="${CLAUDE_CREDENTIALS_FILE:-$HOME/.claude/credentials.json.age}"
+    if [[ -f "$ENCRYPTED_FILE" ]]; then
+        log_info "Using age-encrypted credentials..."
+        CREDS_FILE=$("$SCRIPT_DIR/scripts/inject-credentials-age.sh")
+        return 0
+    fi
+
+    # Try plaintext credentials (warn user)
+    PLAIN_CREDS="$CLAUDE_DIR/.credentials.json"
+    if [[ -f "$PLAIN_CREDS" ]]; then
+        log_warn "Using plaintext credentials (consider encrypting with ./scripts/setup-credentials.sh)"
+        CREDS_FILE="$PLAIN_CREDS"
+        return 0
+    fi
+
+    # No credentials found - Claude Code will prompt for auth
+    log_warn "No credentials found. You may need to authenticate."
+    return 0
+}
+
+cleanup_credentials() {
+    # Only clean up if we created a temp file
+    if [[ -n "$CREDS_FILE" ]] && [[ "$CREDS_FILE" == /tmp/* || "$CREDS_FILE" == /dev/shm/* ]]; then
+        log_info "Cleaning up temporary credentials..."
+        shred -u "$CREDS_FILE" 2>/dev/null || rm -f "$CREDS_FILE"
+    fi
+}
+
+#######################################
+# Logging setup
+
+setup_logging() {
+    mkdir -p "$LOG_DIR"
+
+    # Create log file if it doesn't exist
+    LOG_FILE="$LOG_DIR/commands.log"
+    if [[ ! -f "$LOG_FILE" ]]; then
+        touch "$LOG_FILE"
+    fi
+
+    # Try to set append-only attribute (requires root on host)
+    if command -v chattr &>/dev/null; then
+        sudo chattr +a "$LOG_FILE" 2>/dev/null || \
+            log_warn "Could not set append-only on log file (requires sudo)"
+    fi
+}
+
+#######################################
+# Directory setup
+
+setup_directories() {
+    # Create config directory structure
+    mkdir -p "$CLAUDE_DIR/.claude/projects"
+    mkdir -p "$CLAUDE_DIR/settings"
+
+    # Create empty settings files if they don't exist
+    [[ -f "$CLAUDE_DIR/settings.json" ]] || echo '{}' > "$CLAUDE_DIR/settings.json"
+    [[ -f "$CLAUDE_DIR/settings.local.json" ]] || echo '{}' > "$CLAUDE_DIR/settings.local.json"
+}
+
+#######################################
+# Main container run
+
+run_container() {
+    local use_proxy="$1"
+    local run_shell="$2"
+    shift 2
+    local claude_args=("$@")
+
+    # Build mount arguments
+    local mounts=()
+
+    # Workspace (read-write)
+    mounts+=("-v" "$SCRIPT_DIR:/workspace:rw")
+
+    # Settings (read-only, mounted to claude's home for symlinks)
+    mounts+=("-v" "$CLAUDE_DIR/settings.json:/home/claude/.claude/settings.json:ro")
+    mounts+=("-v" "$CLAUDE_DIR/settings.local.json:/home/claude/.claude/settings.local.json:ro")
+
+    # Credentials (read-only)
+    if [[ -n "$CREDS_FILE" ]] && [[ -f "$CREDS_FILE" ]]; then
+        mounts+=("-v" "$CREDS_FILE:/home/claude/.claude/.credentials.json:ro")
+    fi
+
+    # Session logs (read-write)
+    mounts+=("-v" "$CLAUDE_DIR/.claude/projects:/home/claude-agent/.claude/projects:rw")
+
+    # Command logs (read-write)
+    mounts+=("-v" "$LOG_DIR:/var/log/claudebox:rw")
+
+    # Build environment arguments
+    local env_args=()
+
+    if [[ "$use_proxy" == "true" ]]; then
+        env_args+=("-e" "HTTP_PROXY=http://claudebox-proxy:3128")
+        env_args+=("-e" "HTTPS_PROXY=http://claudebox-proxy:3128")
+        env_args+=("-e" "http_proxy=http://claudebox-proxy:3128")
+        env_args+=("-e" "https_proxy=http://claudebox-proxy:3128")
+    fi
+
+    # Build network arguments
+    local net_args=()
+    if [[ "$use_proxy" == "true" ]]; then
+        net_args+=("--network" "$NETWORK_NAME")
+        net_args+=("--dns" "127.0.0.1")
+        net_args+=("--dns-search" ".")
+    fi
+
+    # Build security arguments
+    local security_args=(
+        "--read-only"
+        "--cap-drop" "ALL"
+        "--security-opt" "no-new-privileges"
+        "--security-opt" "seccomp=$SCRIPT_DIR/seccomp-profile.json"
+        "--pid=private"
+        "--ipc=private"
+        "--memory" "$MEMORY_LIMIT"
+        "--cpus" "$CPU_LIMIT"
+        "--pids-limit" "$PIDS_LIMIT"
+        "--ulimit" "nofile=256:256"
+        "--ulimit" "nproc=64:64"
+    )
+
+    # Temp filesystems
+    local tmpfs_args=(
+        "--tmpfs" "/tmp:size=100M,mode=1777"
+        "--tmpfs" "/run:size=10M,mode=755"
+    )
+
+    # Determine command
+    local cmd_args=()
+    if [[ "$run_shell" == "true" ]]; then
+        cmd_args=("/bin/bash")
+    elif [[ ${#claude_args[@]} -gt 0 ]]; then
+        cmd_args=("${claude_args[@]}")
+    fi
+
+    log_header "Starting Claudebox"
+    log_info "Workspace: $SCRIPT_DIR"
+    log_info "Proxy: $([[ "$use_proxy" == "true" ]] && echo "enabled" || echo "disabled")"
+
+    # Run the container
+    $RUNTIME run --rm -it \
+        "${mounts[@]}" \
+        "${env_args[@]}" \
+        "${net_args[@]}" \
+        "${security_args[@]}" \
+        "${tmpfs_args[@]}" \
+        "$IMAGE_NAME" \
+        "${cmd_args[@]}"
+}
+
+#######################################
+# Main
+
+main() {
+    local use_proxy=true
+    local build_only=false
+    local run_shell=false
+    local claude_args=()
+
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --no-proxy)
+                use_proxy=false
+                shift
+                ;;
+            --build-only)
+                build_only=true
+                shift
+                ;;
+            --shell)
+                run_shell=true
+                shift
+                ;;
+            --help|-h)
+                show_help
+                exit 0
+                ;;
+            --)
+                shift
+                claude_args=("$@")
+                break
+                ;;
+            *)
+                claude_args+=("$1")
+                shift
+                ;;
+        esac
+    done
+
+    # Detect runtime
+    detect_runtime
+
+    # Build containers
+    build_main_container
+    if [[ "$use_proxy" == "true" ]]; then
+        build_proxy_container
+    fi
+
+    if [[ "$build_only" == "true" ]]; then
+        log_info "Build complete."
+        exit 0
+    fi
+
+    # Setup
+    setup_directories
+    setup_logging
+
+    # Get credentials
+    get_credentials
+    trap cleanup_credentials EXIT
+
+    # Start proxy if needed
+    if [[ "$use_proxy" == "true" ]]; then
+        setup_network
+        start_proxy
+    fi
+
+    # Run the container
+    run_container "$use_proxy" "$run_shell" "${claude_args[@]}"
+}
+
+main "$@"

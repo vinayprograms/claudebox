@@ -1,2 +1,26 @@
+# Claude Code configuration (may contain sensitive data)
 .claude
 claude/
+
+# Claudebox runtime directories
+claude-config/
+claudebox-logs/
+
+# Credentials (never commit!)
+*.credentials.json
+credentials.json.age
+*.age
+
+# Container build artifacts
+*.tar
+*.tar.gz
+
+# Editor files
+*.swp
+*.swo
+*~
+.*.swp
+
+# OS files
+.DS_Store
+Thumbs.db
