@@ -1,0 +1,30 @@
+# Security proxy for Claudebox
+# Provides allowlist-based network access control for Claude Code container
+FROM alpine:3.21
+
+# Install squid proxy
+RUN apk add --no-cache squid
+
+# Create directories
+RUN mkdir -p /var/log/squid /var/cache/squid /etc/squid/errors
+
+# Copy configuration
+COPY squid.conf /etc/squid/squid.conf
+COPY errors/ /etc/squid/errors/
+
+# Set permissions
+RUN chown -R squid:squid /var/log/squid /var/cache/squid && \
+    chmod 755 /var/log/squid /var/cache/squid
+
+# Initialize cache
+RUN squid -N -z 2>/dev/null || true
+
+# Expose proxy port
+EXPOSE 3128
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+    CMD squid -k check || exit 1
+
+# Run squid in foreground
+CMD ["squid", "-N", "-d", "1"]

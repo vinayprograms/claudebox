@@ -1,0 +1,41 @@
+{
+  "defaultAction": "SCMP_ACT_ALLOW",
+  "syscalls": [
+    {
+      "names": [
+        "mount",
+        "umount",
+        "umount2",
+        "pivot_root",
+        "chroot",
+        "ptrace",
+        "process_vm_readv",
+        "process_vm_writev",
+        "reboot",
+        "syslog",
+        "kexec_load",
+        "kexec_file_load",
+        "init_module",
+        "finit_module",
+        "delete_module",
+        "bpf",
+        "perf_event_open",
+        "keyctl",
+        "request_key",
+        "add_key",
+        "acct",
+        "quotactl",
+        "swapon",
+        "swapoff",
+        "nfsservctl",
+        "personality",
+        "unshare",
+        "setns",
+        "kcmp",
+        "userfaultfd"
+      ],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1
+    }
+  ]
+}

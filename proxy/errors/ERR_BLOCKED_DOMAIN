@@ -1,0 +1,13 @@
+HTTP/1.1 403 Forbidden
+Content-Type: application/json
+X-Proxy-Block-Reason: domain-not-allowlisted
+Connection: close
+
+{
+  "error": "blocked_by_security_proxy",
+  "code": 403,
+  "domain": "%H",
+  "message": "Domain not in proxy allowlist",
+  "resolution": "Add '%H' to proxy-allowlist.conf and restart the proxy container",
+  "documentation": "See SECURE_CLAUDE_CODE.md for details on the proxy allowlist"
+}
