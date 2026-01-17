@@ -40,6 +40,25 @@ if [[ ! -f "$HOME/.claude/.credentials.json" ]] && \
     log_warn "Mount credentials to $HOME/.claude/.credentials.json"
 fi
 
+# Warn about plugin security if plugins are present
+if [[ -d "$HOME/.claude/plugins" ]] && [[ -n "$(ls -A "$HOME/.claude/plugins" 2>/dev/null)" ]]; then
+    echo ""
+    echo -e "${YELLOW}╔════════════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${YELLOW}║${NC}  ${RED}⚠  PLUGIN SECURITY WARNING${NC}                                       ${YELLOW} ║${NC}"
+    echo -e "${YELLOW}╠════════════════════════════════════════════════════════════════════╣${NC}"
+    echo -e "${YELLOW}║${NC}  Plugins run with FULL Claude Code permissions.                    ${YELLOW}║${NC}"
+    echo -e "${YELLOW}║${NC}  A malicious plugin can read files, run commands, and exfiltrate.  ${YELLOW}║${NC}"
+    echo -e "${YELLOW}║${NC}                                                                    ${YELLOW}║${NC}"
+    echo -e "${YELLOW}║${NC}  Only install plugins from trusted sources.                        ${YELLOW}║${NC}"
+    echo -e "${YELLOW}║${NC}  Review plugin code before installation.                           ${YELLOW}║${NC}"
+    echo -e "${YELLOW}╚════════════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    if [[ "$SKIP_PLUGIN_WARNING" != "1" ]]; then
+        echo -e "Press ${GREEN}Enter${NC} to continue..."
+        read -r
+    fi
+fi
+
 # Log startup
 log_info "Starting Claude Code..."
 log_info "User: $(whoami)"
