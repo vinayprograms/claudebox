@@ -123,17 +123,17 @@ gitlab.com
 - Check `proxy/allowlist.conf` for the required domain
 - Try `./claudebox --no-proxy` to bypass the proxy
 
-## Contributing
+## How This Was Built
 
 This project was vibe-coded end-to-end. I provided design guidance, security requirements, and developer experience feedback, while Claude Code (using Opus 4.5) took care of implementation.
 
-Contributions are welcome! If you'd like to contribute:
-When contributing code, please use "deny by default, allow by exception" as the foundational principle.
+## Contributing
+
+Contributions are welcome! When contributing code, please use "deny by default, allow by exception" as the foundational principle.
 
 1. **Bug reports & feature requests** - Open an issue describing the problem or idea.
 2. **Code contributions** - Fork, make changes, and submit a pull request.
 3. **Security issues** - Please report vulnerabilities privately via [GitHub's security reporting](../../security/advisories/new).
-
 
 ## License
 
