@@ -34,10 +34,6 @@ IMAGE_NAME="claudebox:latest"
 PROXY_IMAGE_NAME="claudebox-proxy:latest"
 NETWORK_NAME="claudebox-internal"
 
-# Resource limits
-MEMORY_LIMIT="2g"
-CPU_LIMIT="2"
-PIDS_LIMIT="256"
 
 #######################################
 # Helper functions
@@ -61,10 +57,11 @@ Usage:
   ./claudebox [options] [-- claude-args]
 
 Options:
-  --no-proxy      Run without network proxy (less secure, but simpler)
-  --build-only    Only build the container, don't run
-  --shell         Start a shell instead of Claude Code
-  --help          Show this help message
+  --no-proxy              Run without network proxy (less secure, but simpler)
+  --build-only            Only build the container, don't run
+  --shell                 Start a shell instead of Claude Code
+  --skip-plugin-warning   Skip the plugin warning prompt (banner still shown)
+  --help                  Show this help message
 
 Environment variables:
   CLAUDE_CREDENTIALS_FILE  Path to age-encrypted credentials file
@@ -125,10 +122,18 @@ setup_network() {
 #######################################
 # Proxy management
 
+reload_proxy_config() {
+    # Reload squid config (handles unchanged configs gracefully)
+    log_info "Reloading proxy allowlist..."
+    $RUNTIME exec claudebox-proxy squid -k reconfigure 2>/dev/null || \
+        log_warn "Failed to reload proxy config"
+}
+
 start_proxy() {
     # Check if proxy is already running
     if $RUNTIME ps --format '{{.Names}}' | grep -q "^claudebox-proxy$"; then
         log_info "Proxy container already running"
+        reload_proxy_config
         return 0
     fi
 
@@ -150,7 +155,7 @@ start_proxy() {
         --tmpfs /var/cache/squid:size=100M,mode=1777 \
         --tmpfs /var/log/squid:size=10M,mode=1777 \
         --tmpfs /var/run/squid:size=1M,mode=1777 \
-        -v "$SCRIPT_DIR/proxy-allowlist.conf":/etc/squid/allowlist.conf:ro \
+        -v "$SCRIPT_DIR/proxy":/etc/squid/host-config:ro \
         "$PROXY_IMAGE_NAME"
 
     # Connect proxy to internal network so main container can reach it
@@ -275,6 +280,32 @@ setup_logging() {
 }
 
 #######################################
+# Plugin staging (avoids macOS secd hangs)
+
+prepare_plugins() {
+    local plugins_dir="$CLAUDE_DIR/.claude/plugins"
+    local staging_dir="$CLAUDE_DIR/.claude/plugins-staging"
+
+    if [[ -d "$plugins_dir" ]]; then
+        log_info "Syncing plugins to staging directory..."
+        mkdir -p "$staging_dir"
+        # Sync plugins excluding .git (which contains executables that trigger macOS security scanning)
+        rsync -a --delete --exclude='.git' "$plugins_dir/" "$staging_dir/"
+    fi
+}
+
+sync_plugins_back() {
+    local plugins_dir="$CLAUDE_DIR/.claude/plugins"
+    local staging_dir="$CLAUDE_DIR/.claude/plugins-staging"
+
+    if [[ -d "$staging_dir" ]] && [[ -d "$plugins_dir" ]]; then
+        log_info "Syncing plugin changes back..."
+        # Sync changes back, preserving .git in the original
+        rsync -a --exclude='.git' "$staging_dir/" "$plugins_dir/"
+    fi
+}
+
+#######################################
 # Directory setup
 
 setup_directories() {
@@ -293,24 +324,18 @@ setup_directories() {
 run_container() {
     local use_proxy="$1"
     local run_shell="$2"
-    shift 2
+    local skip_plugin_warning="$3"
+    shift 3
     local claude_args=("$@")
 
     # Build mount arguments
     local mounts=()
 
     # Workspace: Mount CURRENT WORKING DIRECTORY, not script directory
-    # SECURITY: This ensures claudebox installation files (proxy-allowlist.conf,
+    # SECURITY: This ensures claudebox installation files (proxy/allowlist.conf,
     # seccomp-profile.json, etc.) are NOT accessible to Claude Code
     local workspace_dir="$PWD"
     mounts+=("-v" "$workspace_dir:/workspace:rw")
-
-    # Home directory needs tmpfs for Claude's runtime files (.claude.json, etc.)
-    # We overlay specific paths on top for config management
-    # Note: Docker doesn't handle tmpfs + bind mount overlay well, so skip for Docker
-    if [[ "$RUNTIME" == "podman" ]]; then
-        mounts+=("--tmpfs" "/home/claude-agent:size=50M,mode=1777")
-    fi
 
     # Claude config mounts - two modes based on whether credentials exist
     local creds_on_host="$CLAUDE_DIR/.claude/.credentials.json"
@@ -320,31 +345,19 @@ run_container() {
     [[ -f "$claude_json" ]] || echo '{}' > "$claude_json"
     mounts+=("-v" "$claude_json:/home/claude-agent/.claude.json:rw")
 
-    # Mount Claude config - tmpfs base + mount specific files/dirs to persist session state
-    # We skip debug/ and statsig/ (caches that cause hangs when large) but keep session data
     if [[ -f "$creds_on_host" ]]; then
         log_info "Existing credentials found - using secured mode"
 
-        # Base: tmpfs for .claude (allows Claude to create any structure it needs)
-        mounts+=("--tmpfs" "/home/claude-agent/.claude:size=50M,mode=1777")
+        # Mount .claude directly, then shadow specific paths
+        mounts+=("-v" "$CLAUDE_DIR/.claude:/home/claude-agent/.claude:rw")
 
-        # Auth & settings (read-only for security)
-        mounts+=("-v" "$creds_on_host:/home/claude-agent/.claude/.credentials.json:ro")
-        [[ -f "$CLAUDE_DIR/.claude/settings.json" ]] && \
-            mounts+=("-v" "$CLAUDE_DIR/.claude/settings.json:/home/claude-agent/.claude/settings.json:ro")
-        [[ -f "$CLAUDE_DIR/.claude/settings.local.json" ]] && \
-            mounts+=("-v" "$CLAUDE_DIR/.claude/settings.local.json:/home/claude-agent/.claude/settings.local.json:ro")
+        # Shadow credentials - rw needed for token refresh
+        # TODO: Consider ro mount with periodic sync for better security
+        mounts+=("-v" "$creds_on_host:/home/claude-agent/.claude/.credentials.json:rw")
 
-        # Session state (read-write for persistence)
-        [[ -f "$CLAUDE_DIR/.claude/history.jsonl" ]] && \
-            mounts+=("-v" "$CLAUDE_DIR/.claude/history.jsonl:/home/claude-agent/.claude/history.jsonl:rw")
-        [[ -d "$CLAUDE_DIR/.claude/projects" ]] && \
-            mounts+=("-v" "$CLAUDE_DIR/.claude/projects:/home/claude-agent/.claude/projects:rw")
-        [[ -d "$CLAUDE_DIR/.claude/todos" ]] && \
-            mounts+=("-v" "$CLAUDE_DIR/.claude/todos:/home/claude-agent/.claude/todos:rw")
-
-        # Note: debug/, statsig/, session-env/, shell-snapshots/ are NOT mounted
-        # They accumulate files and cause container hangs when mounted
+        # Shadow plugins/ with staging directory (excludes .git to avoid macOS secd hangs)
+        [[ -d "$CLAUDE_DIR/.claude/plugins-staging" ]] && \
+            mounts+=("-v" "$CLAUDE_DIR/.claude/plugins-staging:/home/claude-agent/.claude/plugins:rw")
     else
         # First-time setup: mount .claude directory writable for initial authentication
         log_warn "No credentials found - running in SETUP MODE"
@@ -366,6 +379,10 @@ run_container() {
         env_args+=("-e" "https_proxy=http://claudebox-proxy:3128")
     fi
 
+    if [[ "$skip_plugin_warning" == "true" ]]; then
+        env_args+=("-e" "SKIP_PLUGIN_WARNING=1")
+    fi
+
     # Build network arguments
     # Note: Don't override DNS - podman's internal network provides DNS for container
     # names (e.g., claudebox-proxy). The proxy allowlist controls external access.
@@ -374,16 +391,11 @@ run_container() {
         net_args+=("--network" "$NETWORK_NAME")
     fi
 
-    # Build security arguments
+    # Build security arguments (actual security controls, not resource limits)
     local security_args=(
         "--read-only"
         "--cap-drop" "ALL"
         "--security-opt" "no-new-privileges"
-        "--memory" "$MEMORY_LIMIT"
-        "--cpus" "$CPU_LIMIT"
-        "--pids-limit" "$PIDS_LIMIT"
-        "--ulimit" "nofile=1024:1024"
-        "--ulimit" "nproc=256:256"
     )
 
     # Runtime-specific options
@@ -443,6 +455,7 @@ main() {
     local use_proxy=true
     local build_only=false
     local run_shell=false
+    local skip_plugin_warning=false
     local claude_args=()
 
     # Parse arguments
@@ -458,6 +471,10 @@ main() {
                 ;;
             --shell)
                 run_shell=true
+                shift
+                ;;
+            --skip-plugin-warning)
+                skip_plugin_warning=true
                 shift
                 ;;
             --help|-h)
@@ -493,6 +510,7 @@ main() {
     # Setup
     setup_directories
     setup_logging
+    prepare_plugins
 
     # Get credentials
     get_credentials
@@ -500,8 +518,9 @@ main() {
     # Store proxy state for cleanup function (needs to be global)
     USE_PROXY="$use_proxy"
 
-    # Cleanup on exit: credentials and proxy (if last instance)
+    # Cleanup on exit: sync plugins, cleanup credentials, stop proxy (if last instance)
     cleanup_on_exit() {
+        sync_plugins_back
         cleanup_credentials
         cleanup_proxy_if_unused
     }
@@ -514,7 +533,7 @@ main() {
     fi
 
     # Run the container
-    run_container "$use_proxy" "$run_shell" "${claude_args[@]}"
+    run_container "$use_proxy" "$run_shell" "$skip_plugin_warning" "${claude_args[@]}"
 }
 
 main "$@"
