@@ -8,6 +8,6 @@ Connection: close
   "code": 403,
   "domain": "%H",
   "message": "Domain not in proxy allowlist",
-  "resolution": "Add '%H' to proxy-allowlist.conf and restart the proxy container",
+  "resolution": "Add '%H' to proxy/allowlist.conf and reload will happen automatically",
   "documentation": "See SECURE_CLAUDE_CODE.md for details on the proxy allowlist"
 }
