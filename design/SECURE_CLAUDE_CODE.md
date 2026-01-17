@@ -4,6 +4,14 @@ A comprehensive security design for running Claude Code inside a container with 
 
 **Last Updated:** January 2026
 
+> **Note:** This is a reference design document. The actual implementation may differ.
+> For current behavior, see [README.md](../README.md) and [CONFIG_SECURITY_GUIDE.md](./CONFIG_SECURITY_GUIDE.md).
+>
+> **Key implementation notes:**
+> - Resource limits (memory, CPU, PIDs, ulimits) are not enforced - the proxy allowlist is the primary security boundary
+> - Credentials are read-write (not read-only) to allow OAuth token refresh
+> - Plugins use a staging directory to avoid macOS file sharing issues
+
 ---
 
 ## Introduction
@@ -110,7 +118,7 @@ X-Proxy-Block-Reason: domain-not-allowlisted
   "code": 403,
   "domain": "<blocked-domain>",
   "message": "Domain not in proxy allowlist",
-  "resolution": "Add '<domain>' to proxy-allowlist.conf and restart proxy"
+  "resolution": "Add '<domain>' to proxy/allowlist.conf and restart proxy"
 }
 ```
 
@@ -133,7 +141,7 @@ podman network create --internal claude-internal
 podman run -d --name net-proxy \
     --network claude-internal \
     --network slirp4netns \
-    -v ./proxy-allowlist.conf:/etc/squid/allowlist.conf:ro \
+    -v ./proxy/allowlist.conf:/etc/squid/allowlist.conf:ro \
     squid-proxy:latest
 
 # Claude Code container (internal only)
@@ -478,7 +486,7 @@ fi
 
 Network MCPs are controlled entirely by the proxy allowlist. Claude Code doesn't validate network MCPs - it just attempts to connect, and the proxy allows or blocks.
 
-### Proxy Allowlist (`proxy-allowlist.conf`)
+### Proxy Allowlist (`proxy/allowlist.conf`)
 
 ```conf
 # === REQUIRED (do not remove) ===
@@ -791,7 +799,7 @@ export PROMPT_COMMAND='
 }
 ```
 
-### Proxy Allowlist (`proxy-allowlist.conf`)
+### Proxy Allowlist (`proxy/allowlist.conf`)
 
 ```conf
 # === REQUIRED (Claude API) ===

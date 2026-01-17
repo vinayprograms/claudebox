@@ -43,7 +43,7 @@ Every entry and exit point is locked down. Access is granted only to explicitly 
 │  ┌─────────────────┐     ┌─────────────────────────────────────────┐   │
 │  │  Your Project   │     │         Claudebox Installation          │   │
 │  │  (workspace)    │     │  - claudebox script                     │   │
-│  │                 │     │  - proxy-allowlist.conf                 │   │
+│  │                 │     │  - proxy/allowlist.conf                 │   │
 │  │  /my-project    │     │  - security profiles                    │   │
 │  └────────┬────────┘     └─────────────────────────────────────────┘   │
 │           │                                                             │
@@ -106,8 +106,7 @@ The main container where Claude Code runs. Security features:
 |---------|---------|
 | Read-only filesystem | Prevents malware installation |
 | Dropped capabilities | No privilege escalation |
-| Seccomp profile | Blocks dangerous syscalls |
-| Resource limits | Prevents resource exhaustion |
+| Seccomp profile | Blocks dangerous syscalls (Podman) |
 | No direct internet | All traffic through proxy |
 
 ### 3. Proxy Container
@@ -119,13 +118,15 @@ A Squid proxy that controls all network access:
 | Domain allowlist | Only approved sites reachable |
 | Request logging | Audit trail for all requests |
 | Rate limiting | Prevents bulk data exfiltration |
+| Payload size limit | Max 50MB per request |
+| Auto-reload | Config reloads when allowlist changes |
 | HTTPS only | No unencrypted traffic |
 
 ### 4. Configuration Files
 
 | File | Purpose |
 |------|---------|
-| `proxy-allowlist.conf` | Domains Claude can access |
+| `proxy/allowlist.conf` | Domains Claude can access |
 | `seccomp-profile.json` | Syscalls to block |
 | `claude-config/` | Persistent Claude settings |
 
@@ -148,7 +149,7 @@ A Squid proxy that controls all network access:
 5. Start Claude Code container
    └─ Connects to internal network ONLY
    └─ Mounts current directory as /workspace
-   └─ Mounts credentials (read-only)
+   └─ Mounts credentials (read-write for token refresh)
                 │
 6. Claude Code runs with:
    └─ HTTP_PROXY=http://proxy:3128
@@ -183,6 +184,8 @@ Claude Code                 Proxy                    Internet
 2. Claude Code container stops (--rm removes it)
                 │
 3. Cleanup function runs:
+   └─ Sync plugin changes back to host
+   └─ Clean up temporary credentials
    └─ Check: other claudebox instances running?
       │
       ├─ YES: Keep proxy alive for other instances
@@ -198,9 +201,7 @@ Claude Code                 Proxy                    Internet
 claudebox/
 ├── claudebox                 # Main script
 ├── Containerfile             # Claude Code container definition
-├── Dockerfile                # Same as Containerfile
-├── proxy-allowlist.conf      # Allowed domains
-├── seccomp-profile.json      # Syscall filter
+├── seccomp-profile.json      # Syscall filter (Podman only)
 │
 ├── design/                   # Documentation
 │   ├── DESIGN.md             # This file
@@ -215,8 +216,9 @@ claudebox/
 │       └── pre-push          # Git push validation
 │
 ├── proxy/                    # Proxy container
-│   ├── Dockerfile
+│   ├── Containerfile
 │   ├── squid.conf
+│   ├── allowlist.conf        # Allowed domains
 │   └── errors/               # Custom error pages
 │
 ├── claude-config/            # [gitignored] Persistent config
@@ -245,9 +247,10 @@ When no credentials exist, claudebox runs in setup mode:
 ### Secured Mode (Subsequent Runs)
 
 After authentication, claudebox locks down:
-- Credentials: **read-only** (can't be modified)
+- Credentials: **read-write** (stored in `claude-config/`, allows token refresh)
 - Settings: **read-only** (can't be tampered)
 - Workspace: **read-write** (your project)
+- Plugins: **read-write** (via staging directory to avoid macOS issues)
 - Runtime state: **read-write** (temporary)
 
 ```
@@ -260,7 +263,7 @@ After authentication, claudebox locks down:
 
 ### Adding Allowed Domains
 
-Edit `proxy-allowlist.conf`:
+Edit `proxy/allowlist.conf`:
 
 ```conf
 # Required (don't remove)
@@ -270,16 +273,6 @@ Edit `proxy-allowlist.conf`:
 # Add your domains
 .mycompany.com
 api.internal.corp
-```
-
-### Resource Limits
-
-Edit the variables at the top of `claudebox`:
-
-```bash
-MEMORY_LIMIT="2g"    # Max RAM
-CPU_LIMIT="2"        # Max CPU cores
-PIDS_LIMIT="256"     # Max processes
 ```
 
 ### MCP Servers
@@ -296,7 +289,7 @@ ALLOWED_STDIO=(
 )
 ```
 
-Network MCP servers are controlled by `proxy-allowlist.conf`.
+Network MCP servers are controlled by `proxy/allowlist.conf`.
 
 ---
 
@@ -328,8 +321,11 @@ cd ~/projects/backend
 | No direct DNS | Prevents DNS exfiltration |
 | No SSH from container | Network isolation |
 | Can't install packages | Read-only filesystem |
+| macOS file read errors | VM file sharing layer overwhelmed by parallel reads |
 
 These are intentional security trade-offs, not bugs.
+
+**macOS Note:** On macOS, both Docker and Podman run containers inside a VM with a file sharing layer (VirtioFS). When Claude Code spawns parallel subagents that read many files, this layer can become overwhelmed, causing transient `Error -35` (EAGAIN) failures. This is a platform limitation, not specific to claudebox. Retrying usually succeeds. Running on Linux avoids this issue entirely.
 
 ---
 
@@ -338,7 +334,7 @@ These are intentional security trade-offs, not bugs.
 ### "Network unreachable"
 
 Claude Code has no direct internet. All requests must go through the proxy.
-- Check if domain is in `proxy-allowlist.conf`
+- Check if domain is in `proxy/allowlist.conf`
 - Check if proxy is running: `podman ps | grep claudebox-proxy`
 
 ### "Permission denied" on files
