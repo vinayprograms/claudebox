@@ -106,8 +106,9 @@ build_main_container() {
     local build_args=()
 
     # Pass CA cert as build arg if provided (for TLS inspection proxies)
+    # Note: base64 | tr -d '\n' is used for cross-platform compatibility (macOS lacks -w0)
     if [[ -n "$ca_cert_file" ]]; then
-        build_args+=("--build-arg" "CA_CERT_BASE64=$(base64 -w0 "$ca_cert_file")")
+        build_args+=("--build-arg" "CA_CERT_BASE64=$(base64 "$ca_cert_file" | tr -d '\n')")
     fi
 
     log_header "Building Claudebox container"
