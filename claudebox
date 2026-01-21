@@ -102,8 +102,16 @@ detect_runtime() {
 # Build containers
 
 build_main_container() {
+    local ca_cert_file="$1"
+    local build_args=()
+
+    # Pass CA cert as build arg if provided (for TLS inspection proxies)
+    if [[ -n "$ca_cert_file" ]]; then
+        build_args+=("--build-arg" "CA_CERT_BASE64=$(base64 -w0 "$ca_cert_file")")
+    fi
+
     log_header "Building Claudebox container"
-    $RUNTIME build -f "$SCRIPT_DIR/Containerfile" -t "$IMAGE_NAME" "$SCRIPT_DIR"
+    $RUNTIME build "${build_args[@]}" -f "$SCRIPT_DIR/Containerfile" -t "$IMAGE_NAME" "$SCRIPT_DIR"
 }
 
 build_proxy_container() {
@@ -538,7 +546,7 @@ main() {
     detect_runtime
 
     # Build containers
-    build_main_container
+    build_main_container "$ca_cert_file"
     if [[ "$use_proxy" == "true" ]]; then
         build_proxy_container
     fi

@@ -29,6 +29,17 @@ RUN adduser -D -s /bin/bash claude && \
     chown -R claude-agent:claude /workspace
 
 #######################################
+# Custom CA Certificate (for TLS inspection proxies like Zscaler)
+# Pass via: --build-arg CA_CERT_BASE64=$(base64 -w0 /path/to/cert.crt)
+
+ARG CA_CERT_BASE64=""
+RUN if [ -n "$CA_CERT_BASE64" ]; then \
+        echo "$CA_CERT_BASE64" | base64 -d > /usr/local/share/ca-certificates/custom-ca.crt && \
+        update-ca-certificates && \
+        echo "Custom CA certificate installed"; \
+    fi
+
+#######################################
 # Install Claude Code and Go (for MCPs)
 
 # Install Claude Code globally
