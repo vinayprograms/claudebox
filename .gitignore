@@ -38,3 +38,7 @@ credentials.json.age
 # OS files
 .DS_Store
 Thumbs.db
+
+# Certificate files
+*.pem
+*.crt
