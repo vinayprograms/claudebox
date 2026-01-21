@@ -67,6 +67,9 @@ RUN mkdir -p /var/log/claudebox && \
     chown claude-agent:claude /var/log/claudebox && \
     chmod 750 /var/log/claudebox
 
+# Create directory for custom CA certificate mounting (e.g., Zscaler)
+RUN mkdir -p /etc/claudebox
+
 # Create git hooks directory
 RUN mkdir -p /etc/git-hooks && \
     chmod 755 /etc/git-hooks

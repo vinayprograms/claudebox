@@ -24,6 +24,18 @@ log_error() {
     echo -e "${RED}[claudebox]${NC} $1"
 }
 
+# Install custom CA certificate if provided (for TLS inspection proxies like Zscaler)
+if [[ "$CUSTOM_CA_CERT" == "1" ]] && [[ -f "/etc/claudebox/custom-ca.crt" ]]; then
+    log_info "Installing custom CA certificate..."
+    # Copy custom CA to the standard location and run update-ca-certificates
+    # Both /usr/local/share/ca-certificates and /etc/ssl/certs are tmpfs at runtime
+    cp /etc/claudebox/custom-ca.crt /usr/local/share/ca-certificates/custom-ca.crt
+    update-ca-certificates --fresh > /dev/null 2>&1
+    # Also set NODE_EXTRA_CA_CERTS for Node.js applications
+    export NODE_EXTRA_CA_CERTS=/etc/claudebox/custom-ca.crt
+    log_info "Custom CA certificate installed"
+fi
+
 # Validate stdio MCP servers if config exists
 if [[ -f "/workspace/.mcp.json" ]]; then
     log_info "Validating MCP configuration..."
@@ -69,6 +81,11 @@ if [[ -n "$HTTP_PROXY" ]]; then
     log_info "Proxy: $HTTP_PROXY"
 else
     log_warn "No proxy configured. Network access may be unrestricted."
+fi
+
+# Show custom CA status
+if [[ "$CUSTOM_CA_CERT" == "1" ]]; then
+    log_info "Custom CA: enabled"
 fi
 
 # Source audit logging if available

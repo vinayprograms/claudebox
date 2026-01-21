@@ -10,10 +10,11 @@
 #   ./claudebox [options] [-- claude-args]
 #
 # Options:
-#   --no-proxy      Run without network proxy (less secure)
-#   --build-only    Only build the container, don't run
-#   --shell         Start a shell instead of Claude Code
-#   --help          Show this help message
+#   --no-proxy          Run without network proxy (less secure)
+#   --ca-cert <file>    Custom CA certificate (for TLS inspection proxies)
+#   --build-only        Only build the container, don't run
+#   --shell             Start a shell instead of Claude Code
+#   --help              Show this help message
 #
 # Environment variables:
 #   CLAUDE_CREDENTIALS_FILE  Path to age-encrypted credentials
@@ -58,6 +59,7 @@ Usage:
 
 Options:
   --no-proxy              Run without network proxy (less secure, but simpler)
+  --ca-cert <file>        Custom CA certificate to trust (for TLS inspection proxies)
   --build-only            Only build the container, don't run
   --shell                 Start a shell instead of Claude Code
   --skip-plugin-warning   Skip the plugin warning prompt (banner still shown)
@@ -69,10 +71,11 @@ Environment variables:
   OP_ITEM                  1Password item name (default: Claude Code)
 
 Examples:
-  ./claudebox                      # Run Claude Code with full security
-  ./claudebox --no-proxy           # Run without proxy (simpler setup)
-  ./claudebox --shell              # Start a shell for debugging
-  ./claudebox -- --help            # Pass --help to Claude Code
+  ./claudebox                             # Run Claude Code with full security
+  ./claudebox --no-proxy                  # Run without proxy (simpler setup)
+  ./claudebox --ca-cert /path/to/ca.crt   # Trust custom CA (e.g., Zscaler)
+  ./claudebox --shell                     # Start a shell for debugging
+  ./claudebox -- --help                   # Pass --help to Claude Code
 
 For complete security documentation, see SECURE_CLAUDE_CODE.md
 EOF
@@ -325,7 +328,8 @@ run_container() {
     local use_proxy="$1"
     local run_shell="$2"
     local skip_plugin_warning="$3"
-    shift 3
+    local ca_cert_file="$4"
+    shift 4
     local claude_args=("$@")
 
     # Build mount arguments
@@ -369,6 +373,11 @@ run_container() {
     # Command logs (read-write)
     mounts+=("-v" "$LOG_DIR:/var/log/claudebox:rw")
 
+    # Custom CA certificate support (for TLS inspection proxies like Zscaler)
+    if [[ -n "$ca_cert_file" ]]; then
+        mounts+=("-v" "$ca_cert_file:/etc/claudebox/custom-ca.crt:ro")
+    fi
+
     # Build environment arguments
     local env_args=()
 
@@ -381,6 +390,10 @@ run_container() {
 
     if [[ "$skip_plugin_warning" == "true" ]]; then
         env_args+=("-e" "SKIP_PLUGIN_WARNING=1")
+    fi
+
+    if [[ -n "$ca_cert_file" ]]; then
+        env_args+=("-e" "CUSTOM_CA_CERT=1")
     fi
 
     # Build network arguments
@@ -411,6 +424,13 @@ run_container() {
         "--tmpfs" "/run:size=10M,mode=755"
     )
 
+    # Add tmpfs mounts for CA certificate directories when custom CA cert is provided
+    # This allows update-ca-certificates to run on read-only filesystem
+    if [[ -n "$ca_cert_file" ]]; then
+        tmpfs_args+=("--tmpfs" "/usr/local/share/ca-certificates:size=1M,mode=755")
+        tmpfs_args+=("--tmpfs" "/etc/ssl/certs:size=1M,mode=755")
+    fi
+
     # Determine command
     local cmd_args=()
     if [[ "$run_shell" == "true" ]]; then
@@ -423,6 +443,7 @@ run_container() {
     log_header "Starting Claudebox"
     log_info "Workspace: $workspace_dir"
     log_info "Proxy: $([[ "$use_proxy" == "true" ]] && echo "enabled" || echo "disabled")"
+    [[ -n "$ca_cert_file" ]] && log_info "Custom CA: $(basename "$ca_cert_file")"
 
     # Run the container
     # Use consistent hostname so Claude Code recognizes the installation across runs
@@ -456,6 +477,7 @@ main() {
     local build_only=false
     local run_shell=false
     local skip_plugin_warning=false
+    local ca_cert_file=""
     local claude_args=()
 
     # Parse arguments
@@ -464,6 +486,14 @@ main() {
             --no-proxy)
                 use_proxy=false
                 shift
+                ;;
+            --ca-cert)
+                if [[ -z "$2" ]] || [[ "$2" == --* ]]; then
+                    log_error "--ca-cert requires a file path argument"
+                    exit 1
+                fi
+                ca_cert_file="$2"
+                shift 2
                 ;;
             --build-only)
                 build_only=true
@@ -492,6 +522,17 @@ main() {
                 ;;
         esac
     done
+
+    # Validate CA cert file if specified
+    if [[ -n "$ca_cert_file" ]]; then
+        if [[ ! -f "$ca_cert_file" ]]; then
+            log_error "CA certificate file not found: $ca_cert_file"
+            exit 1
+        fi
+        # Convert to absolute path
+        ca_cert_file="$(cd "$(dirname "$ca_cert_file")" && pwd)/$(basename "$ca_cert_file")"
+        log_info "Using custom CA certificate: $ca_cert_file"
+    fi
 
     # Detect runtime
     detect_runtime
@@ -533,7 +574,7 @@ main() {
     fi
 
     # Run the container
-    run_container "$use_proxy" "$run_shell" "$skip_plugin_warning" "${claude_args[@]}"
+    run_container "$use_proxy" "$run_shell" "$skip_plugin_warning" "$ca_cert_file" "${claude_args[@]}"
 }
 
 main "$@"

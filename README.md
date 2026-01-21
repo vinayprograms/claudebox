@@ -33,13 +33,24 @@ On first run, claudebox runs in "setup mode" to allow authentication. After auth
 ## Usage
 
 ```bash
-./claudebox                        # Run with full security (proxy enabled)
-./claudebox --no-proxy             # Run without network proxy
-./claudebox --shell                # Start a shell instead of Claude Code
-./claudebox --build-only           # Only build containers, don't run
-./claudebox --skip-plugin-warning  # Skip plugin warning prompt (banner still shown)
-./claudebox -- --help              # Pass arguments to Claude Code
+./claudebox                            # Run with full security (proxy enabled)
+./claudebox --no-proxy                 # Run without network proxy
+./claudebox --ca-cert /path/to/ca.crt  # Trust custom CA certificate
+./claudebox --shell                    # Start a shell instead of Claude Code
+./claudebox --build-only               # Only build containers, don't run
+./claudebox --skip-plugin-warning      # Skip plugin warning prompt (banner still shown)
+./claudebox -- --help                  # Pass arguments to Claude Code
 ```
+
+### Custom CA Certificates
+
+If your network uses a TLS inspection proxy (e.g., Zscaler, Netskope), you can provide a custom CA certificate:
+
+```bash
+./claudebox --ca-cert /path/to/corporate-ca.crt
+```
+
+The certificate will be combined with the system CA bundle and trusted by all applications in the container.
 
 ## Directory Structure
 
