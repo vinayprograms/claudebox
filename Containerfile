@@ -1,6 +1,6 @@
 # Alpine container for running Claude Code in isolation
 # See SECURE_CLAUDE_CODE.md for complete security documentation
-FROM alpine:3.21
+FROM alpine:3.24
 
 #######################################
 # Base Setup
