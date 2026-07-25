@@ -1,6 +1,6 @@
 # Security proxy for Claudebox
 # Provides allowlist-based network access control for Claude Code container
-FROM alpine:3.21
+FROM alpine:3.24
 
 # Install squid proxy
 RUN apk add --no-cache squid
